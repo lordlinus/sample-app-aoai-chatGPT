@@ -76,13 +76,21 @@ def generateFilterString(userToken):
 def format_pf_non_streaming_response(
     chatCompletion, history_metadata, message_uuid=None
 ):
+    logging.debug("chatCompletion: {chatCompletion}")
+    response_field = os.environ.get("PROMPTFLOW_RESPONSE_FIELD_NAME")
+    if not response_field:
+        response_field = get_pf_swagger_spec()
     response_obj = {
         "id": chatCompletion["id"],
         "model": "",
         "created": "",
         "object": "",
         "choices": [
-            {"messages": [{"role": "assistant", "content": chatCompletion["reply"]}]}
+            {
+                "messages": [
+                    {"role": "assistant", "content": chatCompletion[response_field]}
+                ]
+            }
         ],
         "history_metadata": history_metadata,
     }
@@ -188,19 +196,43 @@ def format_stream_response(chatCompletionChunk, history_metadata, message_uuid=N
 
 def convert_to_pf_format(input_json):
     output_json = []
+    # align the input json to the format expected by promptflow chat flow
     for message in input_json["messages"]:
         if message:
             if message["role"] == "user":
                 new_obj = {
-                    "inputs": {"query": message["content"]},
-                    "outputs": {
-                        "current_query_intent": "",
-                        "fetched_docs": "",
-                        "reply": "",
-                        "search_intents": "[]",
-                    },
+                    "inputs": {"question": message["content"]},
+                    "outputs": {"answer": ""},
                 }
                 output_json.append(new_obj)
             elif message["role"] == "assistant" and output_json:
-                output_json[-1]["outputs"]["reply"] = message["content"]
+                output_json[-1]["outputs"]["answer"] = message["content"]
     return output_json
+
+
+def get_pf_swagger_spec():
+    logging.debug("Fetching Promptflow Swagger spec")
+    response = requests.get(
+        url=f"{os.environ.get('PROMPTFLOW_ENDPOINT').split('/score')[0]}/swagger.json",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": "Bearer " + os.environ.get("PROMPTFLOW_API_KEY"),
+        },
+    )
+    if response.status_code == 200:
+        swagger_dict = response.json()  # Convert the response to JSON
+        response_fields = swagger_dict["paths"]["/score"]["post"]["responses"]["200"][
+            "content"
+        ]["application/json"]["schema"]["properties"]
+        # get the first response field name from the swagger spec
+        # this is the field name that will be used to extract the response from the promptflow response. set 'PROMPTFLOW_RESPONSE_FIELD_NAME' if you want to use a different field name
+        response_field = list(response_fields.keys())[0]
+        logging.debug(f"Response field name set to: {response_field}")
+        # set the response field name in the environment variable for subsequent use
+        os.environ["PROMPTFLOW_RESPONSE_FIELD_NAME"] = response_field
+        return response_field
+    else:
+        logging.error(
+            f"Error fetching Promptflow Swagger spec {response.status_code} {response.text}"
+        )

@@ -632,11 +632,14 @@ async def promptflow_request(request):
         }
         # Adding timeout for scenarios where response takes longer to come back
         async with httpx.AsyncClient(timeout=30.0) as client:
+            pf_formatted_obj = convert_to_pf_format(request)
+            # NOTE: This only support question and chat_history parameters
+            # If you need to add more parameters, you need to modify the request body
             response = await client.post(
                 PROMPTFLOW_ENDPOINT,
                 json={
-                    "query": convert_to_pf_format(request)[-1]["inputs"]["query"],
-                    "chat_history": convert_to_pf_format(request)[:-1],
+                    "question": pf_formatted_obj[-1]["inputs"]["question"],
+                    "chat_history": pf_formatted_obj[:-1],
                 },
                 headers=headers,
             )
