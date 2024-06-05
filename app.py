@@ -15,16 +15,13 @@ from quart import (
 )
 
 from openai import AsyncAzureOpenAI
-from azure.identity.aio import (
-    DefaultAzureCredential,
-    get_bearer_token_provider
-)
+from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
 from backend.auth.auth_utils import get_authenticated_user_details
 from backend.security.ms_defender_utils import get_msdefender_user_json
 from backend.history.cosmosdbservice import CosmosConversationClient
 from backend.settings import (
     app_settings,
-    MINIMUM_SUPPORTED_AZURE_OPENAI_PREVIEW_API_VERSION
+    MINIMUM_SUPPORTED_AZURE_OPENAI_PREVIEW_API_VERSION,
 )
 from backend.utils import (
     format_as_ndjson,
@@ -32,7 +29,9 @@ from backend.utils import (
     format_non_streaming_response,
     convert_to_pf_format,
     format_pf_non_streaming_response,
+    format_pf_stream_response,
 )
+import asyncio
 
 bp = Blueprint("routes", __name__, static_folder="static", template_folder="static")
 
@@ -47,9 +46,7 @@ def create_app():
 @bp.route("/")
 async def index():
     return await render_template(
-        "index.html",
-        title=app_settings.ui.title,
-        favicon=app_settings.ui.favicon
+        "index.html", title=app_settings.ui.title, favicon=app_settings.ui.favicon
     )
 
 
@@ -75,8 +72,7 @@ USER_AGENT = "GitHubSampleWebApp/AsyncAzureOpenAI/1.0.0"
 frontend_settings = {
     "auth_enabled": app_settings.base_settings.auth_enabled,
     "feedback_enabled": (
-        app_settings.chat_history and
-        app_settings.chat_history.enable_feedback
+        app_settings.chat_history and app_settings.chat_history.enable_feedback
     ),
     "ui": {
         "title": app_settings.ui.title,
@@ -109,8 +105,8 @@ def init_openai_client():
 
         # Endpoint
         if (
-            not app_settings.azure_openai.endpoint and
-            not app_settings.azure_openai.resource
+            not app_settings.azure_openai.endpoint
+            and not app_settings.azure_openai.resource
         ):
             raise ValueError(
                 "AZURE_OPENAI_ENDPOINT or AZURE_OPENAI_RESOURCE is required"
@@ -189,25 +185,19 @@ def prepare_model_args(request_body, request_headers):
     messages = []
     if not app_settings.datasource:
         messages = [
-            {
-                "role": "system",
-                "content": app_settings.azure_openai.system_message
-            }
+            {"role": "system", "content": app_settings.azure_openai.system_message}
         ]
 
     for message in request_messages:
         if message:
-            messages.append(
-                {
-                    "role": message["role"],
-                    "content": message["content"]
-                }
-            )
+            messages.append({"role": message["role"], "content": message["content"]})
 
     user_json = None
-    if (MS_DEFENDER_ENABLED):
+    if MS_DEFENDER_ENABLED:
         authenticated_user_details = get_authenticated_user_details(request_headers)
-        user_json = get_msdefender_user_json(authenticated_user_details, request_headers)
+        user_json = get_msdefender_user_json(
+            authenticated_user_details, request_headers
+        )
 
     model_args = {
         "messages": messages,
@@ -217,15 +207,13 @@ def prepare_model_args(request_body, request_headers):
         "stop": app_settings.azure_openai.stop_sequence,
         "stream": app_settings.azure_openai.stream,
         "model": app_settings.azure_openai.model,
-        "user": user_json
+        "user": user_json,
     }
 
     if app_settings.datasource:
         model_args["extra_body"] = {
             "data_sources": [
-                app_settings.datasource.construct_payload_configuration(
-                    request=request
-                )
+                app_settings.datasource.construct_payload_configuration(request=request)
             ]
         }
 
@@ -268,54 +256,83 @@ def prepare_model_args(request_body, request_headers):
     return model_args
 
 
-async def promptflow_request(request):
-    try:
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {app_settings.promptflow.api_key}",
-        }
-        # Adding timeout for scenarios where response takes longer to come back
-        logging.debug(f"Setting timeout to {app_settings.promptflow.response_timeout}")
-        async with httpx.AsyncClient(
-            timeout=float(app_settings.promptflow.response_timeout)
-        ) as client:
-            pf_formatted_obj = convert_to_pf_format(
-                request,
-                app_settings.promptflow.request_field_name,
-                app_settings.promptflow.response_field_name
-            )
-            # NOTE: This only support question and chat_history parameters
-            # If you need to add more parameters, you need to modify the request body
-            response = await client.post(
+async def promptflow_streaming_request(request_body, request_headers):
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        "Authorization": f"Bearer {app_settings.promptflow.api_key}",
+    }
+    logging.debug(f"request body ==> {request_body}")
+
+    async def generate():  # -> Generator[Any | dict[str, list[dict[str, list]]] | dict, ...:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            async with client.stream(
+                "POST",
                 app_settings.promptflow.endpoint,
                 json={
-                    app_settings.promptflow.request_field_name: pf_formatted_obj[-1]["inputs"][app_settings.promptflow.request_field_name],
-                    "chat_history": pf_formatted_obj[:-1],
+                    "question": request_body["messages"][0]["content"],
+                    "chat_history": [],
                 },
                 headers=headers,
-            )
-        resp = response.json()
-        resp["id"] = request["messages"][-1]["id"]
-        return resp
-    except Exception as e:
-        logging.error(f"An error occurred while making promptflow_request: {e}")
+            ) as response:
+                if response.status_code != 200:
+                    raise Exception(
+                        f"Request failed with status {response.status_code}"
+                    )
+                # Initialize an empty event
+                event = {}
+
+                async def generate(line):
+                    # If the line is empty, it's the end of an event
+                    if line == "":
+                        # If the event has data, yield it and start a new event
+                        if "data" in event:
+                            yield event["data"]
+                            event.clear()
+                    # If the line starts with "data:", it's a data line
+                    elif line.startswith("data:"):
+                        event["data"] = json.loads(line[5:].strip())
+                        yield format_pf_stream_response(event["data"], {}, "")
+                    # If the line starts with "event:", it's an event type line
+                    elif line.startswith("event:"):
+                        # Add the event type to the event
+                        event["event"] = line[6:].strip()
+                    else:
+                        # If the line is not recognized, log it
+                        logging.debug(f"Unrecognized line ============> : {line}")
+
+                # Read the response line by line
+                try:
+                    async for line in response.aiter_lines():
+                        async for data in generate(line):
+                            yield data
+                except asyncio.exceptions.CancelledError:
+                    print("Request was cancelled, retrying...")
+                    await asyncio.sleep(0.1)  # Wait for a short time before retrying
+                    pass
+
+    return generate()
 
 
 async def send_chat_request(request_body, request_headers):
     filtered_messages = []
     messages = request_body.get("messages", [])
     for message in messages:
-        if message.get("role") != 'tool':
+        if message.get("role") != "tool":
             filtered_messages.append(message)
-            
-    request_body['messages'] = filtered_messages
+
+    request_body["messages"] = filtered_messages
     model_args = prepare_model_args(request_body, request_headers)
 
     try:
         azure_openai_client = init_openai_client()
-        raw_response = await azure_openai_client.chat.completions.with_raw_response.create(**model_args)
+        raw_response = (
+            await azure_openai_client.chat.completions.with_raw_response.create(
+                **model_args
+            )
+        )
         response = raw_response.parse()
-        apim_request_id = raw_response.headers.get("apim-request-id") 
+        apim_request_id = raw_response.headers.get("apim-request-id")
     except Exception as e:
         logging.exception("Exception in send_chat_request")
         raise e
@@ -331,21 +348,28 @@ async def complete_chat_request(request_body, request_headers):
             response,
             history_metadata,
             app_settings.promptflow.response_field_name,
-            app_settings.promptflow.citations_field_name
+            app_settings.promptflow.citations_field_name,
         )
     else:
-        response, apim_request_id = await send_chat_request(request_body, request_headers)
+        response, apim_request_id = await send_chat_request(
+            request_body, request_headers
+        )
         history_metadata = request_body.get("history_metadata", {})
-        return format_non_streaming_response(response, history_metadata, apim_request_id)
+        return format_non_streaming_response(
+            response, history_metadata, apim_request_id
+        )
 
 
 async def stream_chat_request(request_body, request_headers):
     response, apim_request_id = await send_chat_request(request_body, request_headers)
     history_metadata = request_body.get("history_metadata", {})
-    
-    async def generate():
+
+    async def generate():  # -> Generator[dict[str, Any] | dict, Any, None]:
+
         async for completionChunk in response:
-            yield format_stream_response(completionChunk, history_metadata, apim_request_id)
+            yield format_stream_response(
+                completionChunk, history_metadata, apim_request_id
+            )
 
     return generate()
 
@@ -354,6 +378,12 @@ async def conversation_internal(request_body, request_headers):
     try:
         if app_settings.azure_openai.stream:
             result = await stream_chat_request(request_body, request_headers)
+            response = await make_response(format_as_ndjson(result))
+            response.timeout = None
+            response.mimetype = "application/json-lines"
+            return response
+        elif app_settings.promptflow.stream:
+            result = await promptflow_streaming_request(request_body, request_headers)
             response = await make_response(format_as_ndjson(result))
             response.timeout = None
             response.mimetype = "application/json-lines"
@@ -368,6 +398,41 @@ async def conversation_internal(request_body, request_headers):
             return jsonify({"error": str(ex)}), ex.status_code
         else:
             return jsonify({"error": str(ex)}), 500
+
+
+async def promptflow_request(request):
+    try:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {app_settings.promptflow.api_key}",
+        }
+        # Adding timeout for scenarios where response takes longer to come back
+        logging.debug(f"Setting timeout to {app_settings.promptflow.response_timeout}")
+        async with httpx.AsyncClient(
+            timeout=float(app_settings.promptflow.response_timeout)
+        ) as client:
+            pf_formatted_obj = convert_to_pf_format(
+                request,
+                app_settings.promptflow.request_field_name,
+                app_settings.promptflow.response_field_name,
+            )
+            # NOTE: This only support question and chat_history parameters
+            # If you need to add more parameters, you need to modify the request body
+            response = await client.post(
+                app_settings.promptflow.endpoint,
+                json={
+                    app_settings.promptflow.request_field_name: pf_formatted_obj[-1][
+                        "inputs"
+                    ][app_settings.promptflow.request_field_name],
+                    "chat_history": pf_formatted_obj[:-1],
+                },
+                headers=headers,
+            )
+        resp = response.json()
+        resp["id"] = request["messages"][-1]["id"]
+        return resp
+    except Exception as e:
+        logging.error(f"An error occurred while making promptflow_request: {e}")
 
 
 @bp.route("/conversation", methods=["POST"])
@@ -848,7 +913,10 @@ async def generate_title(conversation_messages):
     try:
         azure_openai_client = init_openai_client(use_data=False)
         response = await azure_openai_client.chat.completions.create(
-            model=app_settings.azure_openai.model, messages=messages, temperature=1, max_tokens=64
+            model=app_settings.azure_openai.model,
+            messages=messages,
+            temperature=1,
+            max_tokens=64,
         )
 
         title = json.loads(response.choices[0].message.content)["title"]

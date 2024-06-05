@@ -23,6 +23,7 @@ class JSONEncoder(json.JSONEncoder):
 
 
 async def format_as_ndjson(r):
+    print(f"format_as_ndjson ====> {r}")
     try:
         async for event in r:
             yield json.dumps(event, cls=JSONEncoder) + "\n"
@@ -106,6 +107,7 @@ def format_non_streaming_response(chatCompletion, history_metadata, apim_request
 
     return {}
 
+
 def format_stream_response(chatCompletionChunk, history_metadata, apim_request_id):
     response_obj = {
         "id": chatCompletionChunk.id,
@@ -143,8 +145,48 @@ def format_stream_response(chatCompletionChunk, history_metadata, apim_request_i
     return {}
 
 
+def format_pf_stream_response(
+    chatCompletionChunk, history_metadata={}, apim_request_id=""
+):
+    response_obj = {
+        "id": "chatCompletionChunk.id",
+        "model": "chatCompletionChunk.model",
+        "created": "chatCompletionChunk.created",
+        "object": "chatCompletionChunk.object",
+        "choices": [{"messages": []}],
+        "history_metadata": history_metadata,
+        "apim-request-id": apim_request_id,
+    }
+
+    # Initialize an empty string to hold the concatenated answer
+    concatenated_answer = ""
+    logging.debug(f"chatCompletionChunk: {chatCompletionChunk}")
+    # Iterate over the chatCompletionChunk
+
+    # Concatenate the 'answer' field to the concatenated_answer string
+    try:
+        concatenated_answer += chatCompletionChunk["answer"]
+    except Exception as e:
+        logging.error(f"Error in concatenating answer: {e}")
+
+    # Create a message object with the role 'assistant' and the concatenated answer as content
+    messageObj = {
+        "role": "assistant",
+        "content": concatenated_answer,
+    }
+
+    # Append the message object to the messages in the response object
+    response_obj["choices"][0]["messages"].append(messageObj)
+
+    return response_obj
+
+
 def format_pf_non_streaming_response(
-    chatCompletion, history_metadata, response_field_name, citations_field_name, message_uuid=None
+    chatCompletion,
+    history_metadata,
+    response_field_name,
+    citations_field_name,
+    message_uuid=None,
 ):
     if chatCompletion is None:
         logging.error(
@@ -161,15 +203,13 @@ def format_pf_non_streaming_response(
     try:
         messages = []
         if response_field_name in chatCompletion:
-            messages.append({
-                "role": "assistant",
-                "content": chatCompletion[response_field_name] 
-            })
+            messages.append(
+                {"role": "assistant", "content": chatCompletion[response_field_name]}
+            )
         if citations_field_name in chatCompletion:
-            messages.append({ 
-                "role": "tool",
-                "content": chatCompletion[citations_field_name]
-            })
+            messages.append(
+                {"role": "tool", "content": chatCompletion[citations_field_name]}
+            )
         response_obj = {
             "id": chatCompletion["id"],
             "model": "",
@@ -180,7 +220,7 @@ def format_pf_non_streaming_response(
                     "messages": messages,
                     "history_metadata": history_metadata,
                 }
-            ]
+            ],
         }
         return response_obj
     except Exception as e:
@@ -207,8 +247,7 @@ def convert_to_pf_format(input_json, request_field_name, response_field_name):
 
 
 def comma_separated_string_to_list(s: str) -> List[str]:
-    '''
+    """
     Split comma-separated values into a list.
-    '''
-    return s.strip().replace(' ', '').split(',')
-
+    """
+    return s.strip().replace(" ", "").split(",")
