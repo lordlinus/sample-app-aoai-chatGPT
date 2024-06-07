@@ -272,7 +272,7 @@ async def promptflow_streaming_request(request_body, request_headers):
     date = last_message.get("date", None)
 
     async def generate():
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=float(app_settings.promptflow.response_timeout)) as client:
             async with client.stream(
                 "POST",
                 app_settings.promptflow.endpoint,
