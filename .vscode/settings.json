@@ -1,0 +1,4 @@
+{
+    "appService.defaultWebAppToDeploy": "/subscriptions/a195fdab-ef20-44e0-ae3a-48b2e1764e85/resourceGroups/tech-excel-rg/providers/Microsoft.Web/sites/mediacorpapp",
+    "appService.deploySubpath": "."
+}

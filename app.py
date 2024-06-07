@@ -251,10 +251,9 @@ def prepare_model_args(request_body, request_headers):
                         "embedding_dependency"
                     ]["authentication"][field] = "*****"
 
-    logging.debug(f"REQUEST BODY: {json.dumps(model_args_clean, indent=4)}")
+    # logging.debug(f"REQUEST BODY: {json.dumps(model_args_clean, indent=4)}")
 
     return model_args
-
 
 async def promptflow_streaming_request(request_body, request_headers):
     headers = {
@@ -262,56 +261,128 @@ async def promptflow_streaming_request(request_body, request_headers):
         "Accept": "text/event-stream",
         "Authorization": f"Bearer {app_settings.promptflow.api_key}",
     }
-    logging.debug(f"request body ==> {request_body}")
+    pf_formatted_obj = convert_to_pf_format(
+        request_body,
+        app_settings.promptflow.request_field_name,
+        app_settings.promptflow.response_field_name,
+    )
+    history_metadata = request_body.get("history_metadata", {})
+    last_message = request_body.get("messages", [])[-1]
+    message_id = last_message.get("id", None)
+    date = last_message.get("date", None)
 
-    async def generate():  # -> Generator[Any | dict[str, list[dict[str, list]]] | dict, ...:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+    async def generate():
+        async with httpx.AsyncClient(timeout=5.0) as client:
             async with client.stream(
                 "POST",
                 app_settings.promptflow.endpoint,
                 json={
-                    "question": request_body["messages"][0]["content"],
-                    "chat_history": [],
+                    "question": pf_formatted_obj[-1]["inputs"][
+                        app_settings.promptflow.request_field_name
+                    ],
+                    "chat_history": pf_formatted_obj[:-1],
                 },
                 headers=headers,
             ) as response:
+                apim_request_id = response.headers.get("apim-request-id", "None")
                 if response.status_code != 200:
                     raise Exception(
                         f"Request failed with status {response.status_code}"
                     )
-                # Initialize an empty event
                 event = {}
 
                 async def generate(line):
-                    # If the line is empty, it's the end of an event
-                    if line == "":
-                        # If the event has data, yield it and start a new event
-                        if "data" in event:
-                            yield event["data"]
-                            event.clear()
-                    # If the line starts with "data:", it's a data line
-                    elif line.startswith("data:"):
+                    if line.startswith("data:"):
                         event["data"] = json.loads(line[5:].strip())
-                        yield format_pf_stream_response(event["data"], {}, "")
-                    # If the line starts with "event:", it's an event type line
-                    elif line.startswith("event:"):
-                        # Add the event type to the event
-                        event["event"] = line[6:].strip()
-                    else:
-                        # If the line is not recognized, log it
-                        logging.debug(f"Unrecognized line ============> : {line}")
+                        yield format_pf_stream_response(
+                            event["data"],
+                            message_id,
+                            date,
+                            history_metadata,
+                            apim_request_id,
+                        )
 
-                # Read the response line by line
                 try:
                     async for line in response.aiter_lines():
                         async for data in generate(line):
                             yield data
                 except asyncio.exceptions.CancelledError:
-                    print("Request was cancelled, retrying...")
-                    await asyncio.sleep(0.1)  # Wait for a short time before retrying
                     pass
 
     return generate()
+
+# async def promptflow_streaming_request(request_body, request_headers):
+#     # logging.debug("----------------------------------------------")
+#     # logging.debug(f"request header in promptflow_streaming_request: {request_headers}")
+#     # logging.debug(f"request body in promptflow_streaming_request: {request_body}")
+#     # logging.debug("----------------------------------------------")
+#     headers = {
+#         "Content-Type": "application/json",
+#         "Accept": "text/event-stream",
+#         "Authorization": f"Bearer {app_settings.promptflow.api_key}",
+#     }
+#     pf_formatted_obj = convert_to_pf_format(
+#         request_body,
+#         app_settings.promptflow.request_field_name,
+#         app_settings.promptflow.response_field_name,
+#     )
+#     history_metadata = request_body.get("history_metadata", {})
+#     message_id = request_body.get("messages", [])[-1].get("id", None)
+#     date = request_body.get("messages", [])[-1].get("date", None)
+
+#     async def generate():  # -> Generator[Any | dict[str, list[dict[str, list]]] | dict, ...:
+#         async with httpx.AsyncClient(timeout=5.0) as client:
+#             async with client.stream(
+#                 "POST",
+#                 app_settings.promptflow.endpoint,
+#                 json={
+#                     "question": pf_formatted_obj[-1]["inputs"][
+#                         app_settings.promptflow.request_field_name
+#                     ],
+#                     "chat_history": pf_formatted_obj[:-1],
+#                 },
+#                 headers=headers,
+#             ) as response:
+#                 apim_request_id = response.headers.get("apim-request-id", "None")
+#                 if response.status_code != 200:
+#                     raise Exception(
+#                         f"Request failed with status {response.status_code}"
+#                     )
+#                 # Initialize an empty event
+#                 event = {}
+
+#                 async def generate(line):
+#                     # If the line is empty, it's the end of an event
+#                     # if line == "":
+#                     #     # If the event has data, yield it and start a new event
+#                     #     if "data" in event:
+#                     #         yield format_pf_stream_response(
+#                     #             event["data"], history_metadata, apim_request_id
+#                     #         )
+#                     #         # event.clear()
+#                     # # If the line starts with "data:", it's a data line
+#                     if line.startswith("data:"):
+#                         event["data"] = json.loads(line[5:].strip())
+#                         yield format_pf_stream_response(
+#                             event["data"],
+#                             message_id,
+#                             date,
+#                             history_metadata,
+#                             apim_request_id,
+#                         )
+#                     # else:
+#                     #     # If the line is not recognized, log it
+#                     #     logging.debug(f"Unrecognized line ============> : {line}")
+
+#                 # Read the response line by line
+#                 try:
+#                     async for line in response.aiter_lines():
+#                         async for data in generate(line):
+#                             yield data
+#                 except asyncio.exceptions.CancelledError:
+#                     logging.debug("Request was cancelled")
+
+#     return generate()
 
 
 async def send_chat_request(request_body, request_headers):
@@ -456,12 +527,14 @@ def get_frontend_settings():
 ## Conversation History API ##
 @bp.route("/history/generate", methods=["POST"])
 async def add_conversation():
+    # logging.info(f"----------------------add_conversation----------------------")
     authenticated_user = get_authenticated_user_details(request_headers=request.headers)
     user_id = authenticated_user["user_principal_id"]
-
+    # logging.info(f"User ID in add_conversation: {user_id}")
     ## check request for conversation_id
     request_json = await request.get_json()
     conversation_id = request_json.get("conversation_id", None)
+    # logging.debug(f"Request body in add_conversation: {request_json}")
 
     try:
         # make sure cosmos is configured
@@ -497,6 +570,7 @@ async def add_conversation():
                     + "."
                 )
         else:
+            logging.debug(f"Messages: {messages}")
             raise Exception("No user message found")
 
         await cosmos_conversation_client.cosmosdb_client.close()
@@ -505,6 +579,8 @@ async def add_conversation():
         request_body = await request.get_json()
         history_metadata["conversation_id"] = conversation_id
         request_body["history_metadata"] = history_metadata
+        logging.debug(f"Request body in add_conversation: {request_body}")
+
         return await conversation_internal(request_body, request.headers)
 
     except Exception as e:

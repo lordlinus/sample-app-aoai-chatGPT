@@ -3,7 +3,8 @@ import { chatHistorySampleData } from '../constants/chatHistory'
 import { ChatMessage, Conversation, ConversationRequest, CosmosDBHealth, CosmosDBStatus, UserInfo } from './models'
 
 export async function conversationApi(options: ConversationRequest, abortSignal: AbortSignal): Promise<Response> {
-  const response = await fetch('/conversation', {
+  // const response = await fetch('/conversation', {
+  const response = await fetch('http://127.0.0.1:50505/conversation', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'
@@ -76,7 +77,7 @@ export const historyList = async (offset = 0): Promise<Conversation[] | null> =>
 }
 
 export const historyRead = async (convId: string): Promise<ChatMessage[]> => {
-  const response = await fetch('/history/read', {
+  const response = await fetch('http://127.0.0.1:50505/history/read', {
     method: 'POST',
     body: JSON.stringify({
       conversation_id: convId

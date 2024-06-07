@@ -23,7 +23,6 @@ class JSONEncoder(json.JSONEncoder):
 
 
 async def format_as_ndjson(r):
-    print(f"format_as_ndjson ====> {r}")
     try:
         async for event in r:
             yield json.dumps(event, cls=JSONEncoder) + "\n"
@@ -146,40 +145,36 @@ def format_stream_response(chatCompletionChunk, history_metadata, apim_request_i
 
 
 def format_pf_stream_response(
-    chatCompletionChunk, history_metadata={}, apim_request_id=""
+    chatCompletionChunk, message_id, created, history_metadata, apim_request_id
 ):
     response_obj = {
-        "id": "chatCompletionChunk.id",
+        "id": message_id,
         "model": "chatCompletionChunk.model",
-        "created": "chatCompletionChunk.created",
-        "object": "chatCompletionChunk.object",
+        "created": created,
+        "object": "chat.completion.chunk",
         "choices": [{"messages": []}],
         "history_metadata": history_metadata,
         "apim-request-id": apim_request_id,
     }
 
-    # Initialize an empty string to hold the concatenated answer
-    concatenated_answer = ""
-    logging.debug(f"chatCompletionChunk: {chatCompletionChunk}")
-    # Iterate over the chatCompletionChunk
-
-    # Concatenate the 'answer' field to the concatenated_answer string
     try:
-        concatenated_answer += chatCompletionChunk["answer"]
+        concatenated_answer = chatCompletionChunk.get("answer", "")
+        if not concatenated_answer:
+            concatenated_answer = " "
+
+        messageObj = {
+            "role": "assistant",
+            "content": concatenated_answer,
+            "custom_search": chatCompletionChunk.get("custom_search", ""),
+            "api_search": chatCompletionChunk.get("api_search", ""),
+        }
+
+        response_obj["choices"][0]["messages"].append(messageObj)
+        return response_obj
     except Exception as e:
-        logging.error(f"Error in concatenating answer: {e}")
+        pass
 
-    # Create a message object with the role 'assistant' and the concatenated answer as content
-    messageObj = {
-        "role": "assistant",
-        "content": concatenated_answer,
-    }
-
-    # Append the message object to the messages in the response object
-    response_obj["choices"][0]["messages"].append(messageObj)
-
-    return response_obj
-
+    return {}
 
 def format_pf_non_streaming_response(
     chatCompletion,
@@ -199,7 +194,7 @@ def format_pf_non_streaming_response(
         logging.error(f"Error in promptflow response api: {chatCompletion['error']}")
         return {"error": chatCompletion["error"]}
 
-    logging.debug(f"chatCompletion: {chatCompletion}")
+    # logging.debug(f"chatCompletion: {chatCompletion}")
     try:
         messages = []
         if response_field_name in chatCompletion:
@@ -230,7 +225,7 @@ def format_pf_non_streaming_response(
 
 def convert_to_pf_format(input_json, request_field_name, response_field_name):
     output_json = []
-    logging.debug(f"Input json: {input_json}")
+    # logging.debug(f"Input json: {input_json}")
     # align the input json to the format expected by promptflow chat flow
     for message in input_json["messages"]:
         if message:
