@@ -16,14 +16,14 @@ jobs:
       uses: Azure/docker-login@v1
       with:
         # Container registry username
-        username: ${{ secrets.SAMPLEAPP_ACR_USERNAME }}
+        username: ${{ secrets.ACR_USERNAME }}
         # Container registry password
-        password: ${{ secrets.SAMPLEAPP_ACR_PASSWORD }}
+        password: ${{ secrets.ACR_PASSWORD }}
         # Container registry server url
-        login-server: sampleappaoaichatgpt.azurecr.io
+        login-server: acrcontoso7wx5mg43sbnl4.azurecr.io
         
     - uses: actions/checkout@v3
     - name: Build the Docker image
       run:         
-        docker build . --file WebApp.Dockerfile --tag sampleappaoaichatgpt.azurecr.io/sample-app-aoai-chatgpt:$(date +'%Y-%m-%d')_$GITHUB_RUN_NUMBER
+        docker build . --file WebApp.Dockerfile --tag acrcontoso7wx5mg43sbnl4.azurecr.io/sample-app-aoai-chatgpt:$(date +'%Y-%m-%d')_$GITHUB_RUN_NUMBER
       
